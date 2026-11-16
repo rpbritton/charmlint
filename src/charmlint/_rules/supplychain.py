@@ -458,7 +458,8 @@ def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Seq
     target = _ast.call_target(call, imports)
     if target not in _SUBPROCESS_CALLS | _SHELL_CALLS:
         return []
-    command = call.args[0] if call.args else _ast.keyword(call, "args")
+    command_keyword = "cmd" if target == "os.popen" else "args"
+    command = call.args[0] if call.args else _ast.keyword(call, command_keyword)
     if command is None:
         return []
     shell_argument = _ast.keyword(call, "shell")
@@ -537,7 +538,7 @@ def _shell_command_segments(command: str) -> list[list[str]]:
         operator in command for operator in ";&|<>"
     ):
         return []
-    command = re.sub(r"(?<![\w])\d+(?=[<>])", "", command)
+    command = re.sub(r"(?<![^\s;&|])\d+(?=[<>])", "", command)
     segments: list[list[str]] = [[]]
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
     lexer.whitespace_split = True
