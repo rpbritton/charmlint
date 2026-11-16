@@ -6,13 +6,16 @@ charm records where each of those artefacts comes from and which
 versions it accepts.
 """
 
+import ast
 import dataclasses
 import functools
 import pathlib
 import re
+import shlex
+from collections.abc import Sequence
 from typing import Any
 
-from .. import _dependencies, _yaml
+from .. import _ast, _dependencies, _yaml
 from .. import _models as models
 from ._base import Rule
 
@@ -386,7 +389,125 @@ class OpsDependencyExactlyPinned(Rule):
         ]
 
 
+class SnapInstallUnpinned(Rule):
+    """Flag a snap install in charm-owned Python source without a numeric revision."""
+
+    category = "SUPPLYCHAIN"
+    number = 7
+    name = "snap-install-unpinned"
+    description = "snap install command does not pin a revision"
+    default_severity = models.Severity.WARNING
+    reference_url = "https://snapcraft.io/docs/commands/snap-install"
+
+    def check(self, context: models.CharmContext) -> list[models.Diagnostic]:
+        diagnostics: list[models.Diagnostic] = []
+        for module in context.charm_sources():
+            imports = _ast.Imports.of(module)
+            for call in module.walk(ast.Call):
+                invocations = _snap_install_invocations(call, imports)
+                if not invocations:
+                    continue
+                if any(not _has_revision(arguments) for arguments in invocations):
+                    diagnostics.append(
+                        self.diagnostic(
+                            "snap install command does not specify a revision",
+                            path=module.path,
+                            line=call.lineno,
+                            fix_hint="Add `--revision=<revision>` to the snap install command",
+                        )
+                    )
+        return diagnostics
+
+
 _IMAGE_SUFFIXES = ("-image", "_image")
+_SUBPROCESS_CALLS = frozenset({
+    "subprocess.call",
+    "subprocess.check_call",
+    "subprocess.check_output",
+    "subprocess.Popen",
+    "subprocess.run",
+})
+_SHELL_CALLS = frozenset({"os.popen", "os.system"})
+_COMMAND_WRAPPERS = frozenset({"command", "env", "exec", "sudo"})
+
+
+def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Sequence[str | None]]:
+    """Return statically readable snap install argument lists from a process call."""
+    target = _ast.call_target(call, imports)
+    if target not in _SUBPROCESS_CALLS | _SHELL_CALLS:
+        return []
+    command = call.args[0] if call.args else _ast.keyword(call, "args")
+    if command is None:
+        return []
+    if isinstance(command, ast.List | ast.Tuple):
+        arguments = [
+            str(item.value)
+            if isinstance(item, ast.Constant)
+            and isinstance(item.value, str | int)
+            and not isinstance(item.value, bool)
+            else None
+            for item in command.elts
+        ]
+        return [arguments] if _starts_snap_install(arguments) else []
+    if not isinstance(command, ast.Constant) or not isinstance(command.value, str):
+        return []
+    if target in _SUBPROCESS_CALLS and not _literal_true(_ast.keyword(call, "shell")):
+        return []
+    return [
+        segment
+        for line in command.value.splitlines()
+        for segment in _shell_command_segments(line)
+        if _starts_snap_install(segment)
+    ]
+
+
+def _literal_true(expression: ast.expr | None) -> bool:
+    """Whether an expression is the literal boolean ``True``."""
+    return isinstance(expression, ast.Constant) and expression.value is True
+
+
+def _shell_command_segments(command: str) -> list[list[str]]:
+    """Tokenize one shell line and split it at command separators."""
+    segments: list[list[str]] = [[]]
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    try:
+        for token in lexer:
+            if token and all(character in ";&|" for character in token):
+                segments.append([])
+            else:
+                segments[-1].append(token)
+    except ValueError:
+        return []
+    return segments
+
+
+def _starts_snap_install(arguments: Sequence[str | None]) -> bool:
+    """Whether an argv list starts a snap install command."""
+    index = 0
+    while index < len(arguments) and arguments[index] in _COMMAND_WRAPPERS:
+        index += 1
+    executable = arguments[index] if index < len(arguments) else None
+    return (
+        len(arguments) > index + 1
+        and executable is not None
+        and pathlib.PurePosixPath(executable).name == "snap"
+        and arguments[index + 1] == "install"
+    )
+
+
+def _has_revision(arguments: Sequence[str | None]) -> bool:
+    """Whether an install argv explicitly supplies a revision value."""
+    for index, argument in enumerate(arguments):
+        if argument is None:
+            continue
+        if argument.startswith("--revision="):
+            return argument.partition("=")[2].isdecimal()
+        revision = arguments[index + 1] if index + 1 < len(arguments) else None
+        if argument == "--revision" and revision is not None and revision.isdecimal():
+            return True
+    return False
 
 
 def _normalise_image_name(name: object) -> str:

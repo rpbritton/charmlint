@@ -650,3 +650,73 @@ class TestSectionInMessages:
         assert len(hits) == 1
         assert "requirements.txt" not in hits[0].message
         assert hits[0].path == "requirements.txt"
+
+
+class TestSnapInstallUnpinned:
+    """Tests for SUPPLYCHAIN-007 — snap install without a revision."""
+
+    def test_subprocess_install_without_revision_is_flagged(self, tmp_charm: pathlib.Path):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(
+            "import subprocess\nsubprocess.run(['snap', 'install', 'microk8s'])\n"
+        )
+        hits = [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
+        assert len(hits) == 1
+        assert hits[0].severity == Severity.WARNING
+        assert hits[0].path == "src/charm.py"
+        assert hits[0].line == 2
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "subprocess.run(['snap', 'install', 'microk8s', '--revision=123'])",
+            "subprocess.run(['snap', 'install', '--revision', '123', 'microk8s'])",
+            "subprocess.run(['snap', 'install', 'microk8s', '--revision', 123])",
+            "os.system('sudo snap install microk8s --revision=123')",
+            "subprocess.run('snap install microk8s --revision 123', shell=True)",
+        ],
+    )
+    def test_install_with_revision_is_not_flagged(self, tmp_charm: pathlib.Path, command: str):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(f"import os, subprocess\n{command}\n")
+        assert not [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
+
+    def test_import_alias_is_resolved(self, tmp_charm: pathlib.Path):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(
+            "from subprocess import check_call as run\nrun(['snap', 'install', 'microk8s'])\n"
+        )
+        assert [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
+
+    def test_shell_revision_in_later_command_does_not_hide_unpinned_install(
+        self, tmp_charm: pathlib.Path
+    ):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(
+            "import os\nos.system('snap install microk8s; echo --revision=123')\n"
+        )
+        assert [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
+
+    def test_non_numeric_revision_is_not_a_pin(self, tmp_charm: pathlib.Path):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(
+            "import subprocess\n"
+            "subprocess.run(['snap', 'install', 'microk8s', '--revision', 'stable'])\n"
+        )
+        assert [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
+
+    def test_non_install_command_is_not_flagged(self, tmp_charm: pathlib.Path):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(
+            "import subprocess\nsubprocess.run(['snap', 'list'])\n"
+        )
+        assert not [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
+
+    def test_quoted_example_without_a_process_call_is_not_flagged(self, tmp_charm: pathlib.Path):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(
+            '"""Run snap install microk8s here."""\n'
+            "# snap install microk8s\n"
+            "message = 'snap install microk8s'\n"
+        )
+        assert not [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]

@@ -74,6 +74,7 @@ config file overrides it per rule.
 | [SUPPLYCHAIN-001](#supplychain-001-oci-image-missing-upstream-source) | `oci-image-missing-upstream-source` | Info | oci-image resource declared without an 'upstream-source' |
 | [SUPPLYCHAIN-005](#supplychain-005-ops-dependency-unpinned) | `ops-dependency-unpinned` | Warning | ops dependency has no version specifier |
 | [SUPPLYCHAIN-006](#supplychain-006-ops-dependency-exactly-pinned) | `ops-dependency-exactly-pinned` | Info | ops dependency pinned with `==` |
+| [SUPPLYCHAIN-007](#supplychain-007-snap-install-unpinned) | `snap-install-unpinned` | Warning | snap install command does not pin a revision |
 | [TESTING-001](#testing-001-no-unit-tests) | `no-unit-tests` | Warning | No unit tests found in tests/unit/ or unit_tests/ |
 | [TESTING-003](#testing-003-uses-harness) | `uses-harness` | Warning | Unit tests use the deprecated ops.testing.Harness |
 | [TESTING-004](#testing-004-uses-ops-scenario) | `uses-ops-scenario` | Warning | Tests depend on ops-scenario instead of ops[testing] |
@@ -982,6 +983,14 @@ Flag an `ops` dependency with no version specifier.
 **Info** — ops dependency pinned with `==`
 
 Flag an `ops` dependency pinned with `==`.
+
+### SUPPLYCHAIN-007 snap-install-unpinned
+
+**Warning** — snap install command does not pin a revision
+
+Flag a snap install in charm-owned Python source without a numeric revision.
+
+Reference: <https://snapcraft.io/docs/commands/snap-install>
 
 ## TESTING
 
