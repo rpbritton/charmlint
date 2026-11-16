@@ -395,8 +395,8 @@ class SnapInstallUnpinned(Rule):
     Only statically readable process commands are checked. Local ``.snap``
     files and commands with unknown arguments are left alone; the latter
     are not proof that the revision is unpinned. Shell
-    heredocs, multiline commands, quoted shell operators, and unpacked
-    process arguments are not parsed.
+    heredocs, multiline commands, quoted shell operators, unpacked
+    process arguments, and executable overrides are not parsed.
     """
 
     category = "SUPPLYCHAIN"
@@ -470,7 +470,7 @@ def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Seq
     target = _ast.call_target(call, imports)
     if target not in _SUBPROCESS_CALLS | _SHELL_CALLS:
         return []
-    if any(keyword.arg is None for keyword in call.keywords):
+    if any(keyword.arg in {None, "executable"} for keyword in call.keywords):
         return []
     command_keyword = "cmd" if target == "os.popen" else "args"
     command = call.args[0] if call.args else _ast.keyword(call, command_keyword)
@@ -609,7 +609,13 @@ def _snap_install_arguments(arguments: Sequence[str | None]) -> Sequence[str | N
         and pathlib.PurePosixPath(executable).name == "snap"
         and arguments[index + 1] == "install"
     ):
-        return arguments[index + 2 :]
+        install = arguments[index + 2 :]
+        for argument in install:
+            if argument == "--":
+                break
+            if argument in {"--help", "-h"}:
+                return None
+        return install
     return None
 
 
