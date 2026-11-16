@@ -991,8 +991,8 @@ Flag an `ops` dependency pinned with `==`.
 Flag a Snap Store install in charm-owned Python source without a revision.
 
 Only statically readable process commands are checked. Local `.snap`
-files and revision arguments whose values cannot be determined are left
-alone; the latter are not proof that the revision is unpinned. Shell
+files and commands with unknown arguments are left alone; the latter
+are not proof that the revision is unpinned. Shell
 heredocs, multiline commands, quoted shell operators, and unpacked
 process arguments are not parsed.
 

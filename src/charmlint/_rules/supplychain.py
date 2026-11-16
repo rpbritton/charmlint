@@ -393,8 +393,8 @@ class SnapInstallUnpinned(Rule):
     """Flag a Snap Store install in charm-owned Python source without a revision.
 
     Only statically readable process commands are checked. Local ``.snap``
-    files and revision arguments whose values cannot be determined are left
-    alone; the latter are not proof that the revision is unpinned. Shell
+    files and commands with unknown arguments are left alone; the latter
+    are not proof that the revision is unpinned. Shell
     heredocs, multiline commands, quoted shell operators, and unpacked
     process arguments are not parsed.
     """
@@ -415,7 +415,9 @@ class SnapInstallUnpinned(Rule):
                 if not invocations:
                     continue
                 if any(
-                    not _has_revision(arguments) and not _local_snap_install(arguments)
+                    all(argument is not None for argument in arguments)
+                    and not _has_revision(arguments)
+                    and not _local_snap_install(arguments)
                     for arguments in invocations
                 ):
                     diagnostics.append(
@@ -451,7 +453,16 @@ _WRAPPER_VALUE_OPTIONS = {
     "exec": {"-a"},
     "sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt"},
 }
-_SNAP_VALUE_OPTIONS = frozenset({"--channel", "--cohort", "--revision"})
+_SNAP_VALUE_OPTIONS = frozenset({
+    "--channel",
+    "--cohort",
+    "--color",
+    "--name",
+    "--quota-group",
+    "--revision",
+    "--transaction",
+    "--unicode",
+})
 
 
 def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Sequence[str | None]]:
@@ -489,6 +500,7 @@ def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Seq
         install
         for segment in _shell_command_segments(command.value)
         if (install := _snap_install_arguments(segment)) is not None
+        and not any("$" in argument or "`" in argument for argument in install if argument)
     ]
 
 
