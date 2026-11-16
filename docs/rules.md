@@ -988,7 +988,11 @@ Flag an `ops` dependency pinned with `==`.
 
 **Warning** — snap install command does not pin a revision
 
-Flag a snap install in charm-owned Python source without a numeric revision.
+Flag a Snap Store install in charm-owned Python source without a revision.
+
+Only statically readable process commands are checked. Local `.snap`
+files and revision arguments whose values cannot be determined are left
+alone; the latter are not proof that the revision is unpinned.
 
 Reference: <https://snapcraft.io/docs/commands/snap-install>
 

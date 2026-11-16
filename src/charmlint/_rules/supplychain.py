@@ -390,7 +390,12 @@ class OpsDependencyExactlyPinned(Rule):
 
 
 class SnapInstallUnpinned(Rule):
-    """Flag a snap install in charm-owned Python source without a numeric revision."""
+    """Flag a Snap Store install in charm-owned Python source without a revision.
+
+    Only statically readable process commands are checked. Local ``.snap``
+    files and revision arguments whose values cannot be determined are left
+    alone; the latter are not proof that the revision is unpinned.
+    """
 
     category = "SUPPLYCHAIN"
     number = 7
@@ -407,7 +412,10 @@ class SnapInstallUnpinned(Rule):
                 invocations = _snap_install_invocations(call, imports)
                 if not invocations:
                     continue
-                if any(not _has_revision(arguments) for arguments in invocations):
+                if any(
+                    not _has_revision(arguments) and not _local_snap_install(arguments)
+                    for arguments in invocations
+                ):
                     diagnostics.append(
                         self.diagnostic(
                             "snap install command does not specify a revision",
@@ -429,6 +437,19 @@ _SUBPROCESS_CALLS = frozenset({
 })
 _SHELL_CALLS = frozenset({"os.popen", "os.system"})
 _COMMAND_WRAPPERS = frozenset({"command", "env", "exec", "sudo"})
+_WRAPPER_FLAGS = {
+    "command": {"-p"},
+    "env": {"-i", "--ignore-environment", "-0", "--null"},
+    "exec": {"-c", "-l"},
+    "sudo": {"-n", "-E", "-H", "-S", "-b", "--non-interactive", "--preserve-env"},
+}
+_WRAPPER_VALUE_OPTIONS = {
+    "command": set(),
+    "env": {"-u", "--unset", "-C", "--chdir"},
+    "exec": {"-a"},
+    "sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt"},
+}
+_SNAP_VALUE_OPTIONS = frozenset({"--channel", "--cohort", "--revision"})
 
 
 def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Sequence[str | None]]:
@@ -439,7 +460,17 @@ def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Seq
     command = call.args[0] if call.args else _ast.keyword(call, "args")
     if command is None:
         return []
-    if isinstance(command, ast.List | ast.Tuple):
+    shell_argument = _ast.keyword(call, "shell")
+    if shell_argument is not None and not (
+        isinstance(shell_argument, ast.Constant) and isinstance(shell_argument.value, bool)
+    ):
+        return []
+    shell = target in _SHELL_CALLS or _literal_true(shell_argument)
+    if isinstance(command, ast.List | ast.Tuple) and shell:
+        if not command.elts:
+            return []
+        command = command.elts[0]
+    elif isinstance(command, ast.List | ast.Tuple):
         arguments = [
             str(item.value)
             if isinstance(item, ast.Constant)
@@ -448,16 +479,17 @@ def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Seq
             else None
             for item in command.elts
         ]
-        return [arguments] if _starts_snap_install(arguments) else []
+        install = _snap_install_arguments(arguments)
+        return [install] if install is not None else []
     if not isinstance(command, ast.Constant) or not isinstance(command.value, str):
         return []
-    if target in _SUBPROCESS_CALLS and not _literal_true(_ast.keyword(call, "shell")):
+    if not shell:
         return []
     return [
-        segment
+        install
         for line in command.value.splitlines()
         for segment in _shell_command_segments(line)
-        if _starts_snap_install(segment)
+        if (install := _snap_install_arguments(segment)) is not None
     ]
 
 
@@ -483,18 +515,40 @@ def _shell_command_segments(command: str) -> list[list[str]]:
     return segments
 
 
-def _starts_snap_install(arguments: Sequence[str | None]) -> bool:
-    """Whether an argv list starts a snap install command."""
+def _snap_install_arguments(arguments: Sequence[str | None]) -> Sequence[str | None] | None:
+    """Return the arguments after ``snap install``, skipping command wrappers."""
     index = 0
     while index < len(arguments) and arguments[index] in _COMMAND_WRAPPERS:
+        wrapper = arguments[index]
+        if wrapper is None:
+            return None
         index += 1
+        while index < len(arguments):
+            option = arguments[index]
+            if option is None:
+                return None
+            if option == "--":
+                index += 1
+                break
+            if option in _WRAPPER_VALUE_OPTIONS[wrapper]:
+                index += 2
+            elif option in _WRAPPER_FLAGS[wrapper] or (
+                wrapper == "env" and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", option)
+            ):
+                index += 1
+            elif option.startswith("-"):
+                return None
+            else:
+                break
     executable = arguments[index] if index < len(arguments) else None
-    return (
+    if (
         len(arguments) > index + 1
         and executable is not None
         and pathlib.PurePosixPath(executable).name == "snap"
         and arguments[index + 1] == "install"
-    )
+    ):
+        return arguments[index + 2 :]
+    return None
 
 
 def _has_revision(arguments: Sequence[str | None]) -> bool:
@@ -503,11 +557,29 @@ def _has_revision(arguments: Sequence[str | None]) -> bool:
         if argument is None:
             continue
         if argument.startswith("--revision="):
-            return argument.partition("=")[2].isdecimal()
-        revision = arguments[index + 1] if index + 1 < len(arguments) else None
-        if argument == "--revision" and revision is not None and revision.isdecimal():
-            return True
+            revision = argument.partition("=")[2]
+            return revision.isdecimal() or "$" in revision or "`" in revision
+        if argument == "--revision" and index + 1 < len(arguments):
+            revision = arguments[index + 1]
+            return revision is None or revision.isdecimal() or "$" in revision or "`" in revision
     return False
+
+
+def _local_snap_install(arguments: Sequence[str | None]) -> bool:
+    """Whether every identifiable install operand is a local snap file."""
+    operands: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument is None:
+            return False
+        if argument in _SNAP_VALUE_OPTIONS:
+            index += 2
+            continue
+        if not argument.startswith("-"):
+            operands.append(argument)
+        index += 1
+    return bool(operands) and all(operand.endswith(".snap") for operand in operands)
 
 
 def _normalise_image_name(name: object) -> str:
