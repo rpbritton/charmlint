@@ -751,6 +751,8 @@ class TestSnapInstallUnpinned:
             ("os.system('snap install microk8s --revision=123>/dev/null')", False),
             ("os.popen(cmd='snap install microk8s')", True),
             ("os.popen(cmd='snap install microk8s --revision=123')", False),
+            ("subprocess.run(['snap', 'install', 'microk8s', *revision_options])", False),
+            ("subprocess.run(['snap', 'install', 'microk8s'], **process_options)", False),
             ("subprocess.run(['snap', 'install', './workload.snap', '>/dev/null'])", True),
             ("os.system(\"echo ';' snap install microk8s\")", False),
             ("os.system(\"cat <<'EOF'\\nsnap install microk8s\\nEOF\")", False),
