@@ -742,6 +742,17 @@ class TestSnapInstallUnpinned:
             ("subprocess.run(['snap', 'install', 'microk8s', '--revision', revision])", False),
             ("subprocess.run(['snap', 'install', 'microk8s', '--revision'])", True),
             ("os.system('snap install microk8s --revision=$REVISION')", False),
+            ("subprocess.run(['snap', 'install', 'microk8s', f'--revision={revision}'])", False),
+            ("subprocess.run(['snap', 'install', 'microk8s', f'--revision=123'])", False),
+            ("subprocess.run(['snap', 'install', 'microk8s', f'--channel={channel}'])", True),
+            ("os.system('snap install ./workload.snap --dangerous >/dev/null')", False),
+            ("os.system('snap install microk8s >/dev/null')", True),
+            ("os.system('snap install microk8s 2>&1 --revision=123')", False),
+            ("subprocess.run(['snap', 'install', './workload.snap', '>/dev/null'])", True),
+            ("os.system(\"echo ';' snap install microk8s\")", False),
+            ("os.system(\"cat <<'EOF'\\nsnap install microk8s\\nEOF\")", False),
+            ('os.system("snap install \\\\\\nmicrok8s")', True),
+            ('os.system("echo ignored\\nsnap install microk8s")', False),
         ],
     )
     def test_install_variants(self, tmp_charm: pathlib.Path, command: str, warns: bool):

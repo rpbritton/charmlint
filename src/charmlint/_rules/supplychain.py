@@ -394,7 +394,8 @@ class SnapInstallUnpinned(Rule):
 
     Only statically readable process commands are checked. Local ``.snap``
     files and revision arguments whose values cannot be determined are left
-    alone; the latter are not proof that the revision is unpinned.
+    alone; the latter are not proof that the revision is unpinned. Shell
+    heredocs, multiline commands, and quoted shell operators are not parsed.
     """
 
     category = "SUPPLYCHAIN"
@@ -471,14 +472,7 @@ def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Seq
             return []
         command = command.elts[0]
     elif isinstance(command, ast.List | ast.Tuple):
-        arguments = [
-            str(item.value)
-            if isinstance(item, ast.Constant)
-            and isinstance(item.value, str | int)
-            and not isinstance(item.value, bool)
-            else None
-            for item in command.elts
-        ]
+        arguments = _process_arguments(command.elts)
         install = _snap_install_arguments(arguments)
         return [install] if install is not None else []
     if not isinstance(command, ast.Constant) or not isinstance(command.value, str):
@@ -487,10 +481,44 @@ def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Seq
         return []
     return [
         install
-        for line in command.value.splitlines()
-        for segment in _shell_command_segments(line)
+        for segment in _shell_command_segments(command.value)
         if (install := _snap_install_arguments(segment)) is not None
     ]
+
+
+def _process_arguments(expressions: Sequence[ast.expr]) -> list[str | None]:
+    """Keep literal argv values and recognize interpolated revision options."""
+    arguments: list[str | None] = []
+    for expression in expressions:
+        if (
+            isinstance(expression, ast.Constant)
+            and isinstance(expression.value, str | int)
+            and not isinstance(expression.value, bool)
+        ):
+            arguments.append(str(expression.value))
+        elif (
+            isinstance(expression, ast.JoinedStr)
+            and expression.values
+            and isinstance(expression.values[0], ast.Constant)
+            and isinstance(expression.values[0].value, str)
+            and expression.values[0].value.startswith("--revision=")
+            and any(isinstance(value, ast.FormattedValue) for value in expression.values)
+        ):
+            arguments.extend(("--revision", None))
+        elif isinstance(expression, ast.JoinedStr) and all(
+            isinstance(value, ast.Constant) and isinstance(value.value, str)
+            for value in expression.values
+        ):
+            arguments.append(
+                "".join(
+                    value.value
+                    for value in expression.values
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str)
+                )
+            )
+        else:
+            arguments.append(None)
+    return arguments
 
 
 def _literal_true(expression: ast.expr | None) -> bool:
@@ -499,15 +527,31 @@ def _literal_true(expression: ast.expr | None) -> bool:
 
 
 def _shell_command_segments(command: str) -> list[list[str]]:
-    """Tokenize one shell line and split it at command separators."""
+    """Split simple shell commands, discarding redirections and their targets."""
+    command = command.replace("\\\n", "")
+    if "\n" in command or "<<" in command:
+        return []
+    # shlex discards quotes, so it cannot distinguish quoted punctuation
+    # from an operator. Avoid guessing when both appear in a command.
+    if any(quote in command for quote in ("'", '"', "\\")) and any(
+        operator in command for operator in ";&|<>"
+    ):
+        return []
+    command = re.sub(r"(?<![\w])\d+(?=[<>])", "", command)
     segments: list[list[str]] = [[]]
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
     lexer.whitespace_split = True
     lexer.commenters = "#"
     try:
-        for token in lexer:
-            if token and all(character in ";&|" for character in token):
+        tokens = iter(lexer)
+        for token in tokens:
+            if token in {">", ">>", "<", "<>", ">&", "<&"}:
+                if next(tokens, None) is None:
+                    return []
+            elif token and all(character in ";&|" for character in token):
                 segments.append([])
+            elif any(character in token for character in ";&|<>"):
+                return []
             else:
                 segments[-1].append(token)
     except ValueError:
