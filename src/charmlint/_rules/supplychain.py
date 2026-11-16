@@ -9,10 +9,12 @@ versions it accepts.
 import ast
 import dataclasses
 import functools
+import glob
 import pathlib
 import re
 import shlex
-from collections.abc import Sequence
+from collections import Counter
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 from .. import _ast, _dependencies, _yaml
@@ -392,24 +394,44 @@ class OpsDependencyExactlyPinned(Rule):
 class SnapInstallUnpinned(Rule):
     """Flag a Snap Store install in charm-owned Python source without a revision.
 
-    Only statically readable process commands are checked. Local ``.snap``
-    files and commands with unknown arguments are left alone; the latter
-    are not proof that the revision is unpinned. Shell
-    heredocs, multiline commands, comments, quoted shell operators, unpacked
-    process arguments, and executable overrides are not parsed.
+    Checks direct process commands and identifiable ``charmlibs.snap`` or
+    ``operator_libs_linux`` snap-library calls. Local ``.snap`` files and
+    calls whose arguments cannot be determined are left alone. Library
+    objects must be obtained from a ``SnapCache`` in the same scope as
+    their ``ensure`` call; reassigned names are not tracked. Findings
+    identify call sites, not necessarily reachable execution paths.
+    Revision expressions are not evaluated, so a dynamic value might
+    still be empty at runtime.
+
+    This checks the revision requested during installation or reconciliation,
+    not whether subsequent automatic refreshes are held. A revision alone
+    does not prevent a later refresh from changing the installed snap.
+    Shell heredocs, multiline commands, comments, quoted shell operators,
+    unpacked process arguments, and executable overrides are not parsed.
     """
 
     category = "SUPPLYCHAIN"
     number = 7
     name = "snap-install-unpinned"
-    description = "snap install command does not pin a revision"
+    description = "snap installation does not specify a revision"
     default_severity = models.Severity.WARNING
-    reference_url = "https://snapcraft.io/docs/commands/snap-install"
+    reference_url = (
+        "https://canonical.com/juju/docs/ops/latest/howto/run-workloads-with-a-charm-machines/"
+    )
 
     def check(self, context: models.CharmContext) -> list[models.Diagnostic]:
         diagnostics: list[models.Diagnostic] = []
         for module in context.charm_sources():
             imports = _ast.Imports.of(module)
+            for call in _unpinned_snap_library_calls(module, imports):
+                diagnostics.append(
+                    self.diagnostic(
+                        "snap library installation does not specify a revision",
+                        path=module.path,
+                        line=call.lineno,
+                        fix_hint="Specify the snap revision with `revision=`",
+                    )
+                )
             for call in module.walk(ast.Call):
                 invocations = _snap_install_invocations(call, imports)
                 if not invocations:
@@ -463,6 +485,126 @@ _SNAP_VALUE_OPTIONS = frozenset({
     "--transaction",
     "--unicode",
 })
+_SNAP_LIBRARY = re.compile(r"^(?:charmlibs|charms\.operator_libs_linux\.v\d+)\.snap$")
+
+
+def _unpinned_snap_library_calls(
+    module: models.Module, imports: _ast.Imports
+) -> Iterator[ast.Call]:
+    """Find unpinned install calls on recognized snap library objects."""
+    scopes = (module.tree, *module.walk(ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    for scope in scopes:
+        caches: set[str] = set()
+        snaps: set[str] = set()
+        nodes = sorted(
+            _scope_nodes(scope),
+            key=lambda node: (getattr(node, "lineno", 0), getattr(node, "col_offset", 0)),
+        )
+        bindings = Counter(
+            node.id
+            for node in nodes
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del)
+        )
+        for node in nodes:
+            if isinstance(node, ast.Assign | ast.AnnAssign):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                value = node.value
+                is_cache = value is not None and _snap_cache(value, imports)
+                is_snap = value is not None and _snap_from_cache(value, caches, imports)
+                for target in targets:
+                    if not isinstance(target, ast.Name) or bindings[target.id] != 1:
+                        continue
+                    name = target.id
+                    caches.discard(name)
+                    snaps.discard(name)
+                    if is_cache:
+                        caches.add(name)
+                    if is_snap:
+                        snaps.add(name)
+            elif isinstance(node, ast.Call) and _unpinned_snap_library_call(
+                node, imports, caches, snaps
+            ):
+                yield node
+
+
+def _scope_nodes(scope: ast.AST) -> Iterator[ast.AST]:
+    """Walk one lexical scope without entering nested functions or classes."""
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+            continue
+        yield child
+        yield from _scope_nodes(child)
+
+
+def _snap_cache(node: ast.AST, imports: _ast.Imports) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    target = _ast.call_target(node, imports)
+    if target is None:
+        return False
+    module, _, name = target.rpartition(".")
+    return name == "SnapCache" and bool(_SNAP_LIBRARY.fullmatch(module))
+
+
+def _snap_from_cache(node: ast.AST, caches: set[str], imports: _ast.Imports) -> bool:
+    return isinstance(node, ast.Subscript) and (
+        _snap_cache(node.value, imports) or _ast.dotted_name(node.value) in caches
+    )
+
+
+def _unpinned_snap_library_call(
+    call: ast.Call, imports: _ast.Imports, caches: set[str], snaps: set[str]
+) -> bool:
+    """Recognize install-capable library calls with an absent revision."""
+    if any(keyword.arg is None for keyword in call.keywords) or any(
+        isinstance(argument, ast.Starred) for argument in call.args
+    ):
+        return False
+    target = _ast.call_target(call, imports)
+    module, _, method = (target or "").rpartition(".")
+    if _SNAP_LIBRARY.fullmatch(module) and method in {"add", "ensure"}:
+        state_index, revision_index = 1, 6
+    elif (
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "ensure"
+        and (
+            _ast.dotted_name(call.func.value) in snaps
+            or _snap_from_cache(call.func.value, caches, imports)
+        )
+    ):
+        method = "ensure"
+        state_index, revision_index = 0, 5
+    else:
+        return False
+    state = call.args[state_index] if len(call.args) > state_index else _ast.keyword(call, "state")
+    if state is None:
+        if method != "add":
+            return False
+    elif not _install_state(
+        state,
+        imports,
+        strings=state_index == 1,
+        enums=method == "add" or state_index == 0,
+    ):
+        return False
+    revision = (
+        call.args[revision_index]
+        if len(call.args) > revision_index
+        else _ast.keyword(call, "revision")
+    )
+    return revision is None or (
+        isinstance(revision, ast.Constant) and revision.value in (None, "", 0)
+    )
+
+
+def _install_state(state: ast.expr, imports: _ast.Imports, *, strings: bool, enums: bool) -> bool:
+    if isinstance(state, ast.Constant):
+        return strings and state.value in ("present", "latest")
+    if not enums:
+        return False
+    target = imports.resolve(state)
+    module, _, value = (target or "").rpartition(".SnapState.")
+    return value in {"Present", "Latest"} and bool(_SNAP_LIBRARY.fullmatch(module))
 
 
 def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Sequence[str | None]]:
@@ -502,7 +644,11 @@ def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Seq
         install
         for segment in _shell_command_segments(command.value)
         if (install := _snap_install_arguments(segment)) is not None
-        and not any("$" in argument or "`" in argument for argument in install if argument)
+        and not any(
+            "$" in argument or "`" in argument or glob.has_magic(argument)
+            for argument in install
+            if argument
+        )
     ]
 
 

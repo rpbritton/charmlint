@@ -74,7 +74,7 @@ config file overrides it per rule.
 | [SUPPLYCHAIN-001](#supplychain-001-oci-image-missing-upstream-source) | `oci-image-missing-upstream-source` | Info | oci-image resource declared without an 'upstream-source' |
 | [SUPPLYCHAIN-005](#supplychain-005-ops-dependency-unpinned) | `ops-dependency-unpinned` | Warning | ops dependency has no version specifier |
 | [SUPPLYCHAIN-006](#supplychain-006-ops-dependency-exactly-pinned) | `ops-dependency-exactly-pinned` | Info | ops dependency pinned with `==` |
-| [SUPPLYCHAIN-007](#supplychain-007-snap-install-unpinned) | `snap-install-unpinned` | Warning | snap install command does not pin a revision |
+| [SUPPLYCHAIN-007](#supplychain-007-snap-install-unpinned) | `snap-install-unpinned` | Warning | snap installation does not specify a revision |
 | [TESTING-001](#testing-001-no-unit-tests) | `no-unit-tests` | Warning | No unit tests found in tests/unit/ or unit_tests/ |
 | [TESTING-003](#testing-003-uses-harness) | `uses-harness` | Warning | Unit tests use the deprecated ops.testing.Harness |
 | [TESTING-004](#testing-004-uses-ops-scenario) | `uses-ops-scenario` | Warning | Tests depend on ops-scenario instead of ops[testing] |
@@ -986,17 +986,26 @@ Flag an `ops` dependency pinned with `==`.
 
 ### SUPPLYCHAIN-007 snap-install-unpinned
 
-**Warning** — snap install command does not pin a revision
+**Warning** — snap installation does not specify a revision
 
 Flag a Snap Store install in charm-owned Python source without a revision.
 
-Only statically readable process commands are checked. Local `.snap`
-files and commands with unknown arguments are left alone; the latter
-are not proof that the revision is unpinned. Shell
-heredocs, multiline commands, comments, quoted shell operators, unpacked
-process arguments, and executable overrides are not parsed.
+Checks direct process commands and identifiable `charmlibs.snap` or
+`operator_libs_linux` snap-library calls. Local `.snap` files and
+calls whose arguments cannot be determined are left alone. Library
+objects must be obtained from a `SnapCache` in the same scope as
+their `ensure` call; reassigned names are not tracked. Findings
+identify call sites, not necessarily reachable execution paths.
+Revision expressions are not evaluated, so a dynamic value might
+still be empty at runtime.
 
-Reference: <https://snapcraft.io/docs/commands/snap-install>
+This checks the revision requested during installation or reconciliation,
+not whether subsequent automatic refreshes are held. A revision alone
+does not prevent a later refresh from changing the installed snap.
+Shell heredocs, multiline commands, comments, quoted shell operators,
+unpacked process arguments, and executable overrides are not parsed.
+
+Reference: <https://canonical.com/juju/docs/ops/latest/howto/run-workloads-with-a-charm-machines/>
 
 ## TESTING
 

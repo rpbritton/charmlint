@@ -736,6 +736,7 @@ class TestSnapInstallUnpinned:
             ),
             ("subprocess.run(['snap', 'install', snap_path, '--dangerous'])", False),
             ("os.system('snap install $SNAP_PATH --dangerous')", False),
+            ("os.system('snap install * --dangerous')", False),
             ("subprocess.run(['snap install microk8s'], shell=True)", True),
             ("subprocess.run(['snap', 'install', 'microk8s'], shell=True)", False),
             ("subprocess.run(['snap install microk8s --revision=123'], shell=True)", False),
@@ -778,3 +779,105 @@ class TestSnapInstallUnpinned:
         (tmp_charm / "src" / "charm.py").write_text(f"import os, subprocess\n{command}\n")
         hits = [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
         assert bool(hits) is warns
+
+    @pytest.mark.parametrize(
+        ("source", "expected_lines"),
+        [
+            (
+                "from charmlibs import snap\nsnap.add('workload', channel='stable')\n",
+                [2],
+            ),
+            (
+                "from charms.operator_libs_linux.v2 import snap as s\n"
+                "s.ensure('workload', 'present', channel='stable')\n",
+                [2],
+            ),
+            (
+                "from charmlibs import snap\n"
+                "def install():\n"
+                "    cache = snap.SnapCache()\n"
+                "    workload = cache['workload']\n"
+                "    workload.ensure(snap.SnapState.Latest, channel='stable')\n",
+                [5],
+            ),
+            (
+                "from charmlibs.snap import SnapCache, SnapState\n"
+                "SnapCache()['workload'].ensure(SnapState.Present)\n",
+                [2],
+            ),
+            (
+                "from charmlibs import snap\n"
+                "snap.SnapCache()['workload'].ensure(snap.SnapState.Latest, revision='123')\n"
+                "snap.add('workload', revision=revision)\n"
+                "snap.ensure('workload', 'present', revision='123')\n",
+                [],
+            ),
+            (
+                "from charmlibs import snap\n"
+                "snap.add('workload', snap.SnapState.Present)\n"
+                "snap.add('workload', 'latest', 'stable', False, False, None, '123')\n"
+                "snap.ensure('workload', 'latest', 'stable', False, False, None, '123')\n"
+                "snap.SnapCache()['workload'].ensure("
+                "snap.SnapState.Latest, False, False, 'stable', None, '123')\n",
+                [2],
+            ),
+            (
+                "from charmlibs import snap\n"
+                "snap.ensure('workload', snap.SnapState.Latest)\n"
+                "snap.SnapCache()['workload'].ensure('latest')\n",
+                [],
+            ),
+            (
+                "from charmlibs import snap\n"
+                "snap.add('workload', revision=None)\n"
+                "snap.ensure('workload', 'latest', revision='')\n",
+                [2, 3],
+            ),
+            (
+                "from charmlibs import snap\n"
+                "snap.SnapCache()['workload'].ensure(snap.SnapState.Absent)\n"
+                "snap.ensure('workload', 'absent')\n",
+                [],
+            ),
+            (
+                "from charmlibs import snap\n"
+                "snap.add('workload', **options)\n"
+                "snap.SnapCache()['workload'].ensure(state)\n",
+                [],
+            ),
+            (
+                "from charmlibs import snap\n"
+                "cache = snap.SnapCache()\n"
+                "workload = cache['workload']\n"
+                "workload = unrelated\n"
+                "workload.ensure(snap.SnapState.Latest)\n",
+                [],
+            ),
+            (
+                "from charmlibs import snap\n"
+                "if condition:\n"
+                "    workload = unrelated\n"
+                "else:\n"
+                "    workload = snap.SnapCache()['workload']\n"
+                "workload.ensure(snap.SnapState.Latest)\n",
+                [],
+            ),
+            (
+                "from charmlibs import snap\n"
+                "def first():\n"
+                "    cache = snap.SnapCache()\n"
+                "    workload = cache['workload']\n"
+                "def second():\n"
+                "    workload.ensure(snap.SnapState.Latest)\n",
+                [],
+            ),
+        ],
+    )
+    def test_snap_library_calls(
+        self, tmp_charm: pathlib.Path, source: str, expected_lines: list[int]
+    ):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(source)
+        hits = [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
+        assert [d.line for d in hits] == expected_lines
+        assert all(d.path == "src/charm.py" for d in hits)
