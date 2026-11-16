@@ -993,7 +993,7 @@ Flag a Snap Store install in charm-owned Python source without a revision.
 Only statically readable process commands are checked. Local `.snap`
 files and commands with unknown arguments are left alone; the latter
 are not proof that the revision is unpinned. Shell
-heredocs, multiline commands, quoted shell operators, unpacked
+heredocs, multiline commands, comments, quoted shell operators, unpacked
 process arguments, and executable overrides are not parsed.
 
 Reference: <https://snapcraft.io/docs/commands/snap-install>

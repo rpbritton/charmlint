@@ -395,7 +395,7 @@ class SnapInstallUnpinned(Rule):
     Only statically readable process commands are checked. Local ``.snap``
     files and commands with unknown arguments are left alone; the latter
     are not proof that the revision is unpinned. Shell
-    heredocs, multiline commands, quoted shell operators, unpacked
+    heredocs, multiline commands, comments, quoted shell operators, unpacked
     process arguments, and executable overrides are not parsed.
     """
 
@@ -470,7 +470,9 @@ def _snap_install_invocations(call: ast.Call, imports: _ast.Imports) -> list[Seq
     target = _ast.call_target(call, imports)
     if target not in _SUBPROCESS_CALLS | _SHELL_CALLS:
         return []
-    if any(keyword.arg in {None, "executable"} for keyword in call.keywords):
+    if (target in _SUBPROCESS_CALLS and len(call.args) > 2) or any(
+        keyword.arg in {None, "executable"} for keyword in call.keywords
+    ):
         return []
     command_keyword = "cmd" if target == "os.popen" else "args"
     command = call.args[0] if call.args else _ast.keyword(call, command_keyword)
@@ -547,7 +549,7 @@ def _literal_true(expression: ast.expr | None) -> bool:
 def _shell_command_segments(command: str) -> list[list[str]]:
     """Split simple shell commands, discarding redirections and their targets."""
     command = command.replace("\\\n", "")
-    if "\n" in command or "<<" in command:
+    if "\n" in command or "<<" in command or "#" in command:
         return []
     # shlex discards quotes, so it cannot distinguish quoted punctuation
     # from an operator. Avoid guessing when both appear in a command.
