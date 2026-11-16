@@ -688,14 +688,12 @@ class TestSnapInstallUnpinned:
         )
         assert [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
 
-    def test_shell_revision_in_later_command_does_not_hide_unpinned_install(
-        self, tmp_charm: pathlib.Path
-    ):
+    def test_compound_shell_command_is_not_parsed(self, tmp_charm: pathlib.Path):
         write_charmcraft_yaml(tmp_charm, {"name": "x"})
         (tmp_charm / "src" / "charm.py").write_text(
             "import os\nos.system('snap install microk8s; echo --revision=123')\n"
         )
-        assert [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
+        assert not [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
 
     def test_non_numeric_revision_is_not_a_pin(self, tmp_charm: pathlib.Path):
         write_charmcraft_yaml(tmp_charm, {"name": "x"})
@@ -741,9 +739,9 @@ class TestSnapInstallUnpinned:
             ("subprocess.run(['snap', 'install', 'microk8s'], shell=True)", False),
             ("subprocess.run(['snap install microk8s --revision=123'], shell=True)", False),
             ("subprocess.run(['sudo', '-n', 'snap', 'install', 'microk8s'])", True),
-            ("subprocess.run(['sudo', '-u', 'root', 'snap', 'install', 'microk8s'])", True),
-            ("os.system('env FOO=bar snap install microk8s')", True),
-            ("os.system('env -u FOO sudo -n snap install microk8s')", True),
+            ("subprocess.run(['sudo', '-u', 'root', 'snap', 'install', 'microk8s'])", False),
+            ("os.system('env FOO=bar snap install microk8s')", False),
+            ("os.system('env -u FOO sudo -n snap install microk8s')", False),
             ("os.system('command -v snap install microk8s')", False),
             ("subprocess.run(['snap', 'install', 'microk8s'], shell=use_shell)", False),
             ("subprocess.run(['snap', 'install', 'microk8s', '--revision', revision])", False),
@@ -754,7 +752,7 @@ class TestSnapInstallUnpinned:
             ("subprocess.run(['snap', 'install', 'microk8s', f'--channel={channel}'])", False),
             ("subprocess.run(['snap', 'install', './workload.snap', f'--name={name}'])", False),
             ("os.system('snap install ./workload.snap --dangerous >/dev/null')", False),
-            ("os.system('snap install microk8s >/dev/null')", True),
+            ("os.system('snap install microk8s >/dev/null')", False),
             ("os.system('snap install microk8s 2>&1 --revision=123')", False),
             ("os.system('snap install microk8s --revision=123>/dev/null')", False),
             ("os.system('snap install microk8s#note')", False),
@@ -766,11 +764,13 @@ class TestSnapInstallUnpinned:
             ("subprocess.check_output(['snap', 'install', 'microk8s'], -1, '/bin/echo')", False),
             ("subprocess.run(['snap', 'install', '--help'])", False),
             ("subprocess.run(['snap', 'install', '-h'])", False),
+            ("subprocess.run(['snap', 'install'])", False),
             ("subprocess.run(['snap', 'install', '--', '--help', 'microk8s'])", True),
+            ("subprocess.run(['snap', 'install', '--', '--revision=123', 'microk8s'])", True),
             ("subprocess.run(['snap', 'install', './workload.snap', '>/dev/null'])", True),
             ("os.system(\"echo ';' snap install microk8s\")", False),
             ("os.system(\"cat <<'EOF'\\nsnap install microk8s\\nEOF\")", False),
-            ('os.system("snap install \\\\\\nmicrok8s")', True),
+            ('os.system("snap install \\\\\\nmicrok8s")', False),
             ('os.system("echo ignored\\nsnap install microk8s")', False),
         ],
     )

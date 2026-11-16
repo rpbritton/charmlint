@@ -992,9 +992,9 @@ Flag a Snap Store install in charm-owned Python source without a revision.
 
 Checks direct process commands and identifiable `charmlibs.snap` or
 `operator_libs_linux` snap-library calls. Local `.snap` files and
-calls whose arguments cannot be determined are left alone. Library
-objects must be obtained from a `SnapCache` in the same scope as
-their `ensure` call; reassigned names are not tracked. Findings
+process commands with unknown arguments are left alone. Library objects
+must be obtained from a `SnapCache` in the same scope as their
+`ensure` call; reassigned names are not tracked. Findings
 identify call sites, not necessarily reachable execution paths.
 Revision expressions are not evaluated, so a dynamic value might
 still be empty at runtime.
@@ -1002,8 +1002,9 @@ still be empty at runtime.
 This checks the revision requested during installation or reconciliation,
 not whether subsequent automatic refreshes are held. A revision alone
 does not prevent a later refresh from changing the installed snap.
-Shell heredocs, multiline commands, comments, quoted shell operators,
-unpacked process arguments, and executable overrides are not parsed.
+Process calls are checked only for literal argv or simple shell commands,
+optionally prefixed by `sudo` or `sudo -n`. Shell operators,
+expansions, unpacked arguments, and executable overrides are not parsed.
 
 Reference: <https://canonical.com/juju/docs/ops/latest/howto/run-workloads-with-a-charm-machines/>
 
