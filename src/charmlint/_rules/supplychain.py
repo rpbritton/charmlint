@@ -400,7 +400,8 @@ class SnapInstallUnpinned(Rule):
     ``ensure`` call; reassigned names are not tracked. Findings
     identify call sites, not necessarily reachable execution paths.
     Revision expressions are not evaluated, so a dynamic value might
-    still be empty at runtime.
+    still be empty at runtime. Long positional argument lists are skipped
+    because snap library signatures vary between revisions.
 
     This checks the revision requested during installation or reconciliation,
     not whether subsequent automatic refreshes are held. A revision alone
@@ -429,7 +430,7 @@ class SnapInstallUnpinned(Rule):
                         "snap library installation does not specify a revision",
                         path=module.path,
                         line=call.lineno,
-                        fix_hint="Specify the snap revision with `revision=`",
+                        fix_hint="Specify `revision=` using a snap library version that supports it",
                     )
                 )
             for call in module.walk(ast.Call):
@@ -545,7 +546,10 @@ def _unpinned_snap_library_call(
     target = _ast.call_target(call, imports)
     module, _, method = (target or "").rpartition(".")
     if _SNAP_LIBRARY.fullmatch(module) and method in {"add", "ensure"}:
-        state_index, revision_index = 1, 6
+        state_index = 1
+        accepts_string_state = True
+        accepts_enum_state = method == "add"
+        max_unambiguous_args = 5
     elif (
         isinstance(call.func, ast.Attribute)
         and call.func.attr == "ensure"
@@ -555,8 +559,14 @@ def _unpinned_snap_library_call(
         )
     ):
         method = "ensure"
-        state_index, revision_index = 0, 5
+        state_index = 0
+        accepts_string_state = False
+        accepts_enum_state = True
+        max_unambiguous_args = 4
     else:
+        return False
+    # Older v2 libraries place the revision before newer versions do.
+    if len(call.args) > max_unambiguous_args:
         return False
     state = call.args[state_index] if len(call.args) > state_index else _ast.keyword(call, "state")
     if state is None:
@@ -565,15 +575,11 @@ def _unpinned_snap_library_call(
     elif not _install_state(
         state,
         imports,
-        strings=state_index == 1,
-        enums=method == "add" or state_index == 0,
+        strings=accepts_string_state,
+        enums=accepts_enum_state,
     ):
         return False
-    revision = (
-        call.args[revision_index]
-        if len(call.args) > revision_index
-        else _ast.keyword(call, "revision")
-    )
+    revision = _ast.keyword(call, "revision")
     return revision is None or (
         isinstance(revision, ast.Constant) and revision.value in (None, "", 0)
     )

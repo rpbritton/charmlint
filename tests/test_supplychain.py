@@ -822,6 +822,21 @@ class TestSnapInstallUnpinned:
                 [2],
             ),
             (
+                "from charms.operator_libs_linux.v2 import snap\n"
+                "snap.SnapCache()['workload'].ensure("
+                "snap.SnapState.Latest, False, 'stable', '', '123')\n"
+                "snap.add('workload', snap.SnapState.Latest, 'stable', False, '', '123')\n"
+                "snap.ensure('workload', 'latest', 'stable', False, '', '123')\n",
+                [],
+            ),
+            (
+                "from charms.operator_libs_linux.v2 import snap\n"
+                "snap.SnapCache()['workload'].ensure("
+                "snap.SnapState.Latest, False, 'stable', '')\n"
+                "snap.add('workload', snap.SnapState.Latest, 'stable', False, '')\n",
+                [2, 3],
+            ),
+            (
                 "from charmlibs import snap\n"
                 "snap.ensure('workload', snap.SnapState.Latest)\n"
                 "snap.SnapCache()['workload'].ensure('latest')\n",
@@ -881,3 +896,13 @@ class TestSnapInstallUnpinned:
         hits = [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
         assert [d.line for d in hits] == expected_lines
         assert all(d.path == "src/charm.py" for d in hits)
+
+    def test_v1_library_fix_hint_mentions_upgrade(self, tmp_charm: pathlib.Path):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(
+            "from charms.operator_libs_linux.v1 import snap\nsnap.add('workload')\n"
+        )
+        hits = [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
+        assert len(hits) == 1
+        assert hits[0].fix_hint is not None
+        assert "library version" in hits[0].fix_hint

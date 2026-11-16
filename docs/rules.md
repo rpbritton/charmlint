@@ -997,7 +997,8 @@ must be obtained from a `SnapCache` in the same scope as their
 `ensure` call; reassigned names are not tracked. Findings
 identify call sites, not necessarily reachable execution paths.
 Revision expressions are not evaluated, so a dynamic value might
-still be empty at runtime.
+still be empty at runtime. Long positional argument lists are skipped
+because snap library signatures vary between revisions.
 
 This checks the revision requested during installation or reconciliation,
 not whether subsequent automatic refreshes are held. A revision alone
