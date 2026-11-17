@@ -436,7 +436,10 @@ def _unpinned_snap_library_calls(
     module: models.Module, imports: _ast.Imports
 ) -> Iterator[ast.Call]:
     """Find unpinned install calls on recognized snap library objects."""
-    scopes = (module.tree, *module.walk(ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    scopes = (
+        module.tree,
+        *module.walk(ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+    )
     for scope in scopes:
         caches: set[str] = set()
         snaps: set[str] = set()
@@ -470,7 +473,7 @@ def _unpinned_snap_library_calls(
 
 
 def _scope_nodes(scope: ast.AST) -> Iterator[ast.AST]:
-    """Walk one lexical scope without entering nested functions or classes."""
+    """Walk one lexical scope without entering nested scopes."""
     for child in ast.iter_child_nodes(scope):
         if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
             continue

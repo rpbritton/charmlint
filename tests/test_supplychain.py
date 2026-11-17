@@ -682,6 +682,11 @@ class TestSnapInstallUnpinned:
             ),
             (
                 "from charmlibs import snap\n"
+                "install = lambda: snap.add('workload', channel='stable')\n",
+                [2],
+            ),
+            (
+                "from charmlibs import snap\n"
                 "snap.SnapCache()['workload'].ensure(snap.SnapState.Latest, revision='123')\n"
                 "snap.add('workload', revision=revision)\n"
                 "snap.ensure('workload', 'present', revision='123')\n",
