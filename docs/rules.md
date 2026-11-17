@@ -75,6 +75,7 @@ config file overrides it per rule.
 | [SUPPLYCHAIN-005](#supplychain-005-ops-dependency-unpinned) | `ops-dependency-unpinned` | Warning | ops dependency has no version specifier |
 | [SUPPLYCHAIN-006](#supplychain-006-ops-dependency-exactly-pinned) | `ops-dependency-exactly-pinned` | Info | ops dependency pinned with `==` |
 | [SUPPLYCHAIN-007](#supplychain-007-snap-install-unpinned) | `snap-install-unpinned` | Warning | snap installation does not specify a revision |
+| [SUPPLYCHAIN-008](#supplychain-008-snap-revision-without-hold) | `snap-revision-without-hold` | Warning | snap revision selected without a refresh hold |
 | [TESTING-001](#testing-001-no-unit-tests) | `no-unit-tests` | Warning | No unit tests found in tests/unit/ or unit_tests/ |
 | [TESTING-003](#testing-003-uses-harness) | `uses-harness` | Warning | Unit tests use the deprecated ops.testing.Harness |
 | [TESTING-004](#testing-004-uses-ops-scenario) | `uses-ops-scenario` | Warning | Tests depend on ops-scenario instead of ops[testing] |
@@ -991,6 +992,17 @@ Flag an `ops` dependency pinned with `==`.
 Flag snap-library `add` and `ensure` calls without a revision.
 
 A requested revision does not prevent later automatic refreshes.
+
+Reference: <https://canonical.com/juju/docs/ops/latest/howto/run-workloads-with-a-charm-machines/>
+
+### SUPPLYCHAIN-008 snap-revision-without-hold
+
+**Warning** — snap revision selected without a refresh hold
+
+Flag revision-selected snaps that may auto-refresh without a hold.
+
+Recognizes snap-library holds in charm-owned Python source. Ambiguous
+hold targets are left alone; external refresh policies are not inferred.
 
 Reference: <https://canonical.com/juju/docs/ops/latest/howto/run-workloads-with-a-charm-machines/>
 

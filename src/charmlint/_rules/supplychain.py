@@ -408,7 +408,10 @@ class SnapInstallUnpinned(Rule):
         diagnostics: list[models.Diagnostic] = []
         for module in context.charm_sources():
             imports = _ast.Imports.of(module)
-            for call in _unpinned_snap_library_calls(module, imports):
+            for operation in _snap_library_calls(module, imports):
+                call = operation.call
+                if operation.hold or not _missing_snap_revision(call):
+                    continue
                 diagnostics.append(
                     self.diagnostic(
                         "snap installation does not specify a revision",
@@ -420,21 +423,93 @@ class SnapInstallUnpinned(Rule):
         return diagnostics
 
 
+class SnapRevisionWithoutHold(Rule):
+    """Flag revision-selected snaps that may auto-refresh without a hold.
+
+    Recognizes snap-library holds in charm-owned Python source. Ambiguous
+    hold targets are left alone; external refresh policies are not inferred.
+    """
+
+    category = "SUPPLYCHAIN"
+    number = 8
+    name = "snap-revision-without-hold"
+    description = "snap revision selected without a refresh hold"
+    default_severity = models.Severity.WARNING
+    reference_url = (
+        "https://canonical.com/juju/docs/ops/latest/howto/run-workloads-with-a-charm-machines/"
+    )
+
+    def check(self, context: models.CharmContext) -> list[models.Diagnostic]:
+        installs: list[tuple[models.Module, ast.Call, str | None]] = []
+        holds: set[str | None] = set()
+        for module in context.charm_sources():
+            imports = _ast.Imports.of(module)
+            for operation in _snap_library_calls(module, imports):
+                call = operation.call
+                if operation.hold:
+                    holds.add(operation.name)
+                elif not _missing_snap_revision(call):
+                    installs.append((module, call, operation.name))
+            for call in module.walk(ast.Call):
+                target = _ast.call_target(call, imports)
+                library, _, method = (target or "").rpartition(".")
+                if _SNAP_LIBRARY.fullmatch(library) and method == "hold_refresh":
+                    days = call.args[0] if call.args else _ast.keyword(call, "days")
+                    forever = call.args[1] if len(call.args) > 1 else _ast.keyword(call, "forever")
+                    removes_hold = (
+                        isinstance(days, ast.Constant)
+                        and days.value == 0
+                        and (
+                            forever is None
+                            or (isinstance(forever, ast.Constant) and forever.value is False)
+                        )
+                    )
+                    if not removes_hold:
+                        holds.add(None)
+                elif library == "charmlibs.snap" and method in {
+                    "install",
+                    "refresh",
+                    "ensure_installed",
+                }:
+                    if not _missing_snap_revision(call):
+                        name = call.args[0] if call.args else _ast.keyword(call, "snap")
+                        installs.append((module, call, _literal_snap_name(name)))
+        diagnostics: list[models.Diagnostic] = []
+        for module, call, name in installs:
+            # An unresolved hold target might cover this snap.
+            if holds and (name is None or None in holds or name in holds):
+                continue
+            diagnostics.append(
+                self.diagnostic(
+                    "snap revision may change on automatic refresh; no refresh hold found",
+                    path=module.path,
+                    line=call.lineno,
+                    fix_hint="Hold automatic refreshes after installation using the snap library",
+                )
+            )
+        return diagnostics
+
+
 _IMAGE_SUFFIXES = ("-image", "_image")
 _SNAP_LIBRARY = re.compile(r"^(?:charmlibs|charms\.operator_libs_linux\.v\d+)\.snap$")
 
 
-def _unpinned_snap_library_calls(
-    module: models.Module, imports: _ast.Imports
-) -> Iterator[ast.Call]:
-    """Find unpinned install calls on recognized snap library objects."""
+@dataclasses.dataclass(frozen=True)
+class _SnapCall:
+    call: ast.Call
+    name: str | None
+    hold: bool = False
+
+
+def _snap_library_calls(module: models.Module, imports: _ast.Imports) -> Iterator[_SnapCall]:
+    """Find installs and holds, with literal snap names where available."""
     scopes = (
         module.tree,
         *module.walk(ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
     )
     for scope in scopes:
         caches: set[str] = set()
-        snaps: set[str] = set()
+        snaps: dict[str, ast.expr] = {}
         nodes = sorted(
             _scope_nodes(scope),
             key=lambda node: (getattr(node, "lineno", 0), getattr(node, "col_offset", 0)),
@@ -456,12 +531,16 @@ def _unpinned_snap_library_calls(
                     name = target.id
                     if is_cache:
                         caches.add(name)
-                    if is_snap:
-                        snaps.add(name)
-            elif isinstance(node, ast.Call) and _unpinned_snap_library_call(
-                node, imports, caches, snaps
-            ):
-                yield node
+                    if is_snap and isinstance(value, ast.Subscript):
+                        snaps[name] = value.slice
+            elif isinstance(node, ast.Call):
+                operation = _snap_library_operation(node, imports, caches, snaps)
+                if operation is not None:
+                    yield operation
+
+
+def _literal_snap_name(node: ast.expr | None) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
 
 
 def _scope_nodes(scope: ast.AST) -> Iterator[ast.AST]:
@@ -489,10 +568,45 @@ def _snap_from_cache(node: ast.AST, caches: set[str], imports: _ast.Imports) -> 
     )
 
 
-def _unpinned_snap_library_call(
-    call: ast.Call, imports: _ast.Imports, caches: set[str], snaps: set[str]
+def _snap_library_operation(
+    call: ast.Call, imports: _ast.Imports, caches: set[str], snaps: dict[str, ast.expr]
+) -> _SnapCall | None:
+    target = _ast.call_target(call, imports)
+    function_hold = target == "charmlibs.snap.hold"
+    hold = function_hold or (isinstance(call.func, ast.Attribute) and call.func.attr == "hold")
+    if hold:
+        duration_index = 1 if function_hold else 0
+        duration = (
+            call.args[duration_index]
+            if len(call.args) > duration_index
+            else _ast.keyword(call, "duration")
+        )
+        if (
+            isinstance(duration, ast.Constant)
+            and isinstance(duration.value, int | float)
+            and duration.value <= 0
+        ):
+            return None
+    elif not _snap_library_install(call, imports, caches, snaps):
+        return None
+    receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+    if isinstance(receiver, ast.Subscript) and _snap_from_cache(receiver, caches, imports):
+        name = receiver.slice
+    elif isinstance(receiver, ast.Name) and receiver.id in snaps:
+        name = snaps[receiver.id]
+    elif not hold or function_hold:
+        name = call.args[0] if call.args else _ast.keyword(call, "snap_names")
+        if name is None and function_hold:
+            name = _ast.keyword(call, "snap")
+    else:
+        name = None
+    return _SnapCall(call, _literal_snap_name(name), hold=hold)
+
+
+def _snap_library_install(
+    call: ast.Call, imports: _ast.Imports, caches: set[str], snaps: dict[str, ast.expr]
 ) -> bool:
-    """Recognize install-capable library calls with an absent revision."""
+    """Recognize install-capable calls with unambiguous arguments."""
     if any(keyword.arg is None for keyword in call.keywords) or any(
         isinstance(argument, ast.Starred) for argument in call.args
     ):
@@ -533,6 +647,10 @@ def _unpinned_snap_library_call(
         enums=accepts_enum_state,
     ):
         return False
+    return True
+
+
+def _missing_snap_revision(call: ast.Call) -> bool:
     revision = _ast.keyword(call, "revision")
     return revision is None or (
         isinstance(revision, ast.Constant) and revision.value in (None, "", 0)
