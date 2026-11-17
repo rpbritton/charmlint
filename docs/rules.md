@@ -988,24 +988,17 @@ Flag an `ops` dependency pinned with `==`.
 
 **Warning** — snap installation does not specify a revision
 
-Flag a Snap Store install in charm-owned Python source without a revision.
+Flag snap-library installs in charm-owned Python source without a revision.
 
-Checks direct process commands and identifiable `charmlibs.snap` or
-`operator_libs_linux` snap-library calls. Local `.snap` files and
-process commands with unknown arguments are left alone. Library objects
-must be obtained from a `SnapCache` in the same scope as their
-`ensure` call; reassigned names are not tracked. Findings
-identify call sites, not necessarily reachable execution paths.
-Revision expressions are not evaluated, so a dynamic value might
-still be empty at runtime. Long positional argument lists are skipped
-because snap library signatures vary between revisions.
+Checks `add` and `ensure` calls from `charmlibs.snap` and
+`charms.operator_libs_linux`. Objects passed to `ensure` must be
+obtained from `SnapCache` in the same scope. Ambiguous positional
+arguments and dynamic revision values are left alone.
 
 This checks the revision requested during installation or reconciliation,
 not whether subsequent automatic refreshes are held. A revision alone
-does not prevent a later refresh from changing the installed snap.
-Process calls are checked only for literal argv or simple shell commands,
-optionally prefixed by `sudo` or `sudo -n`. Shell operators,
-expansions, unpacked arguments, and executable overrides are not parsed.
+does not prevent a later refresh from changing the installed snap. Findings
+identify call sites, not necessarily reachable execution paths.
 
 Reference: <https://canonical.com/juju/docs/ops/latest/howto/run-workloads-with-a-charm-machines/>
 

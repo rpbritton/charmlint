@@ -653,132 +653,7 @@ class TestSectionInMessages:
 
 
 class TestSnapInstallUnpinned:
-    """Tests for SUPPLYCHAIN-007 — snap install without a revision."""
-
-    def test_subprocess_install_without_revision_is_flagged(self, tmp_charm: pathlib.Path):
-        write_charmcraft_yaml(tmp_charm, {"name": "x"})
-        (tmp_charm / "src" / "charm.py").write_text(
-            "import subprocess\nsubprocess.run(['snap', 'install', 'microk8s'])\n"
-        )
-        hits = [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
-        assert len(hits) == 1
-        assert hits[0].severity == Severity.WARNING
-        assert hits[0].path == "src/charm.py"
-        assert hits[0].line == 2
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "subprocess.run(['snap', 'install', 'microk8s', '--revision=123'])",
-            "subprocess.run(['snap', 'install', '--revision', '123', 'microk8s'])",
-            "subprocess.run(['snap', 'install', 'microk8s', '--revision', 123])",
-            "os.system('sudo snap install microk8s --revision=123')",
-            "subprocess.run('snap install microk8s --revision 123', shell=True)",
-        ],
-    )
-    def test_install_with_revision_is_not_flagged(self, tmp_charm: pathlib.Path, command: str):
-        write_charmcraft_yaml(tmp_charm, {"name": "x"})
-        (tmp_charm / "src" / "charm.py").write_text(f"import os, subprocess\n{command}\n")
-        assert not [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
-
-    def test_import_alias_is_resolved(self, tmp_charm: pathlib.Path):
-        write_charmcraft_yaml(tmp_charm, {"name": "x"})
-        (tmp_charm / "src" / "charm.py").write_text(
-            "from subprocess import check_call as run\nrun(['snap', 'install', 'microk8s'])\n"
-        )
-        assert [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
-
-    def test_compound_shell_command_is_not_parsed(self, tmp_charm: pathlib.Path):
-        write_charmcraft_yaml(tmp_charm, {"name": "x"})
-        (tmp_charm / "src" / "charm.py").write_text(
-            "import os\nos.system('snap install microk8s; echo --revision=123')\n"
-        )
-        assert not [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
-
-    def test_non_numeric_revision_is_not_a_pin(self, tmp_charm: pathlib.Path):
-        write_charmcraft_yaml(tmp_charm, {"name": "x"})
-        (tmp_charm / "src" / "charm.py").write_text(
-            "import subprocess\n"
-            "subprocess.run(['snap', 'install', 'microk8s', '--revision', 'stable'])\n"
-        )
-        assert [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
-
-    def test_non_install_command_is_not_flagged(self, tmp_charm: pathlib.Path):
-        write_charmcraft_yaml(tmp_charm, {"name": "x"})
-        (tmp_charm / "src" / "charm.py").write_text(
-            "import subprocess\nsubprocess.run(['snap', 'list'])\n"
-        )
-        assert not [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
-
-    def test_quoted_example_without_a_process_call_is_not_flagged(self, tmp_charm: pathlib.Path):
-        write_charmcraft_yaml(tmp_charm, {"name": "x"})
-        (tmp_charm / "src" / "charm.py").write_text(
-            '"""Run snap install microk8s here."""\n'
-            "# snap install microk8s\n"
-            "message = 'snap install microk8s'\n"
-        )
-        assert not [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
-
-    @pytest.mark.parametrize(
-        ("command", "warns"),
-        [
-            ("subprocess.run(['snap', 'install', './workload.snap', '--dangerous'])", False),
-            (
-                "subprocess.run(['snap', 'install', '--channel', 'stable', './workload.snap'])",
-                False,
-            ),
-            ("subprocess.run(['snap', 'install', './workload.snap', 'microk8s'])", True),
-            (
-                "subprocess.run(['snap', 'install', '--name', 'workload', './workload.snap'])",
-                False,
-            ),
-            ("subprocess.run(['snap', 'install', snap_path, '--dangerous'])", False),
-            ("os.system('snap install $SNAP_PATH --dangerous')", False),
-            ("os.system('snap install * --dangerous')", False),
-            ("subprocess.run(['snap install microk8s'], shell=True)", True),
-            ("subprocess.run(['snap', 'install', 'microk8s'], shell=True)", False),
-            ("subprocess.run(['snap install microk8s --revision=123'], shell=True)", False),
-            ("subprocess.run(['sudo', '-n', 'snap', 'install', 'microk8s'])", True),
-            ("subprocess.run(['sudo', '-u', 'root', 'snap', 'install', 'microk8s'])", False),
-            ("os.system('env FOO=bar snap install microk8s')", False),
-            ("os.system('env -u FOO sudo -n snap install microk8s')", False),
-            ("os.system('command -v snap install microk8s')", False),
-            ("subprocess.run(['snap', 'install', 'microk8s'], shell=use_shell)", False),
-            ("subprocess.run(['snap', 'install', 'microk8s', '--revision', revision])", False),
-            ("subprocess.run(['snap', 'install', 'microk8s', '--revision'])", True),
-            ("os.system('snap install microk8s --revision=$REVISION')", False),
-            ("subprocess.run(['snap', 'install', 'microk8s', f'--revision={revision}'])", False),
-            ("subprocess.run(['snap', 'install', 'microk8s', f'--revision=123'])", False),
-            ("subprocess.run(['snap', 'install', 'microk8s', f'--channel={channel}'])", False),
-            ("subprocess.run(['snap', 'install', './workload.snap', f'--name={name}'])", False),
-            ("os.system('snap install ./workload.snap --dangerous >/dev/null')", False),
-            ("os.system('snap install microk8s >/dev/null')", False),
-            ("os.system('snap install microk8s 2>&1 --revision=123')", False),
-            ("os.system('snap install microk8s --revision=123>/dev/null')", False),
-            ("os.system('snap install microk8s#note')", False),
-            ("os.popen(cmd='snap install microk8s')", True),
-            ("os.popen(cmd='snap install microk8s --revision=123')", False),
-            ("subprocess.run(['snap', 'install', 'microk8s', *revision_options])", False),
-            ("subprocess.run(['snap', 'install', 'microk8s'], **process_options)", False),
-            ("subprocess.run(['snap', 'install', 'microk8s'], executable='/bin/echo')", False),
-            ("subprocess.check_output(['snap', 'install', 'microk8s'], -1, '/bin/echo')", False),
-            ("subprocess.run(['snap', 'install', '--help'])", False),
-            ("subprocess.run(['snap', 'install', '-h'])", False),
-            ("subprocess.run(['snap', 'install'])", False),
-            ("subprocess.run(['snap', 'install', '--', '--help', 'microk8s'])", True),
-            ("subprocess.run(['snap', 'install', '--', '--revision=123', 'microk8s'])", True),
-            ("subprocess.run(['snap', 'install', './workload.snap', '>/dev/null'])", True),
-            ("os.system(\"echo ';' snap install microk8s\")", False),
-            ("os.system(\"cat <<'EOF'\\nsnap install microk8s\\nEOF\")", False),
-            ('os.system("snap install \\\\\\nmicrok8s")', False),
-            ('os.system("echo ignored\\nsnap install microk8s")', False),
-        ],
-    )
-    def test_install_variants(self, tmp_charm: pathlib.Path, command: str, warns: bool):
-        write_charmcraft_yaml(tmp_charm, {"name": "x"})
-        (tmp_charm / "src" / "charm.py").write_text(f"import os, subprocess\n{command}\n")
-        hits = [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
-        assert bool(hits) is warns
+    """Tests for SUPPLYCHAIN-007 — snap-library installs without a revision."""
 
     @pytest.mark.parametrize(
         ("source", "expected_lines"),
@@ -897,7 +772,7 @@ class TestSnapInstallUnpinned:
         assert [d.line for d in hits] == expected_lines
         assert all(d.path == "src/charm.py" for d in hits)
 
-    def test_v1_library_fix_hint_mentions_upgrade(self, tmp_charm: pathlib.Path):
+    def test_v1_library_fix_hint_mentions_compatible_version(self, tmp_charm: pathlib.Path):
         write_charmcraft_yaml(tmp_charm, {"name": "x"})
         (tmp_charm / "src" / "charm.py").write_text(
             "from charms.operator_libs_linux.v1 import snap\nsnap.add('workload')\n"
@@ -905,4 +780,4 @@ class TestSnapInstallUnpinned:
         hits = [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-007"]
         assert len(hits) == 1
         assert hits[0].fix_hint is not None
-        assert "library version" in hits[0].fix_hint
+        assert "version that supports it" in hits[0].fix_hint

@@ -11,9 +11,8 @@ import dataclasses
 import functools
 import pathlib
 import re
-import shlex
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from typing import Any
 
 from .. import _ast, _dependencies, _yaml
@@ -391,24 +390,17 @@ class OpsDependencyExactlyPinned(Rule):
 
 
 class SnapInstallUnpinned(Rule):
-    """Flag a Snap Store install in charm-owned Python source without a revision.
+    """Flag snap-library installs in charm-owned Python source without a revision.
 
-    Checks direct process commands and identifiable ``charmlibs.snap`` or
-    ``operator_libs_linux`` snap-library calls. Local ``.snap`` files and
-    process commands with unknown arguments are left alone. Library objects
-    must be obtained from a ``SnapCache`` in the same scope as their
-    ``ensure`` call; reassigned names are not tracked. Findings
-    identify call sites, not necessarily reachable execution paths.
-    Revision expressions are not evaluated, so a dynamic value might
-    still be empty at runtime. Long positional argument lists are skipped
-    because snap library signatures vary between revisions.
+    Checks ``add`` and ``ensure`` calls from ``charmlibs.snap`` and
+    ``charms.operator_libs_linux``. Objects passed to ``ensure`` must be
+    obtained from ``SnapCache`` in the same scope. Ambiguous positional
+    arguments and dynamic revision values are left alone.
 
     This checks the revision requested during installation or reconciliation,
     not whether subsequent automatic refreshes are held. A revision alone
-    does not prevent a later refresh from changing the installed snap.
-    Process calls are checked only for literal argv or simple shell commands,
-    optionally prefixed by ``sudo`` or ``sudo -n``. Shell operators,
-    expansions, unpacked arguments, and executable overrides are not parsed.
+    does not prevent a later refresh from changing the installed snap. Findings
+    identify call sites, not necessarily reachable execution paths.
     """
 
     category = "SUPPLYCHAIN"
@@ -427,49 +419,16 @@ class SnapInstallUnpinned(Rule):
             for call in _unpinned_snap_library_calls(module, imports):
                 diagnostics.append(
                     self.diagnostic(
-                        "snap library installation does not specify a revision",
+                        "snap installation does not specify a revision",
                         path=module.path,
                         line=call.lineno,
                         fix_hint="Specify `revision=` using a snap library version that supports it",
                     )
                 )
-            for call in module.walk(ast.Call):
-                arguments = _snap_install_invocation(call, imports)
-                if (
-                    arguments is not None
-                    and not _has_revision(arguments)
-                    and not _local_snap_install(arguments)
-                ):
-                    diagnostics.append(
-                        self.diagnostic(
-                            "snap install command does not specify a revision",
-                            path=module.path,
-                            line=call.lineno,
-                            fix_hint="Add `--revision=<revision>` to the snap install command",
-                        )
-                    )
         return diagnostics
 
 
 _IMAGE_SUFFIXES = ("-image", "_image")
-_SUBPROCESS_CALLS = frozenset({
-    "subprocess.call",
-    "subprocess.check_call",
-    "subprocess.check_output",
-    "subprocess.Popen",
-    "subprocess.run",
-})
-_SHELL_CALLS = frozenset({"os.popen", "os.system"})
-_SNAP_VALUE_OPTIONS = frozenset({
-    "--channel",
-    "--cohort",
-    "--color",
-    "--name",
-    "--quota-group",
-    "--revision",
-    "--transaction",
-    "--unicode",
-})
 _SNAP_LIBRARY = re.compile(r"^(?:charmlibs|charms\.operator_libs_linux\.v\d+)\.snap$")
 
 
@@ -593,111 +552,6 @@ def _install_state(state: ast.expr, imports: _ast.Imports, *, strings: bool, enu
     target = imports.resolve(state)
     module, _, value = (target or "").rpartition(".SnapState.")
     return value in {"Present", "Latest"} and bool(_SNAP_LIBRARY.fullmatch(module))
-
-
-def _snap_install_invocation(call: ast.Call, imports: _ast.Imports) -> Sequence[str] | None:
-    """Return snap install arguments from a simple, statically readable process call."""
-    target = _ast.call_target(call, imports)
-    if target not in _SUBPROCESS_CALLS | _SHELL_CALLS:
-        return None
-    if (target in _SUBPROCESS_CALLS and len(call.args) > 2) or any(
-        keyword.arg in {None, "executable"} for keyword in call.keywords
-    ):
-        return None
-    command_keyword = "cmd" if target == "os.popen" else "args"
-    command = call.args[0] if call.args else _ast.keyword(call, command_keyword)
-    if command is None:
-        return None
-    shell_argument = _ast.keyword(call, "shell")
-    if shell_argument is not None and not (
-        isinstance(shell_argument, ast.Constant) and isinstance(shell_argument.value, bool)
-    ):
-        return None
-    shell = target in _SHELL_CALLS or (
-        isinstance(shell_argument, ast.Constant) and shell_argument.value is True
-    )
-    if isinstance(command, ast.List | ast.Tuple) and shell:
-        if not command.elts:
-            return None
-        command = command.elts[0]
-    if isinstance(command, ast.List | ast.Tuple) and not shell:
-        arguments = []
-        for item in command.elts:
-            if not isinstance(item, ast.Constant) or not isinstance(item.value, str | int):
-                return None
-            if isinstance(item.value, bool):
-                return None
-            arguments.append(str(item.value))
-    elif shell and isinstance(command, ast.Constant) and isinstance(command.value, str):
-        arguments = _simple_shell_arguments(command.value)
-    else:
-        return None
-    return _snap_install_arguments(arguments)
-
-
-def _simple_shell_arguments(command: str) -> list[str]:
-    """Split a shell command only when it needs no shell interpretation."""
-    if any(char in command for char in "\n\\;&|<>#$`*?[]{}()~"):
-        return []
-    try:
-        return shlex.split(command)
-    except ValueError:
-        return []
-
-
-def _snap_install_arguments(arguments: Sequence[str]) -> Sequence[str] | None:
-    """Return the arguments after ``snap install``, optionally preceded by sudo."""
-    index = 0
-    if arguments and arguments[0] == "sudo":
-        index += 1
-        if index < len(arguments) and arguments[index] == "-n":
-            index += 1
-    executable = arguments[index] if index < len(arguments) else None
-    if (
-        len(arguments) > index + 1
-        and executable is not None
-        and pathlib.PurePosixPath(executable).name == "snap"
-        and arguments[index + 1] == "install"
-    ):
-        install = arguments[index + 2 :]
-        if not install:
-            return None
-        for argument in install:
-            if argument == "--":
-                break
-            if argument in {"--help", "-h"}:
-                return None
-        return install
-    return None
-
-
-def _has_revision(arguments: Sequence[str]) -> bool:
-    """Whether an install argv explicitly supplies a revision value."""
-    for index, argument in enumerate(arguments):
-        if argument == "--":
-            break
-        if argument.startswith("--revision="):
-            revision = argument.partition("=")[2]
-            return revision.isdecimal() or "$" in revision or "`" in revision
-        if argument == "--revision" and index + 1 < len(arguments):
-            revision = arguments[index + 1]
-            return revision.isdecimal() or "$" in revision or "`" in revision
-    return False
-
-
-def _local_snap_install(arguments: Sequence[str]) -> bool:
-    """Whether every identifiable install operand is a local snap file."""
-    operands: list[str] = []
-    index = 0
-    while index < len(arguments):
-        argument = arguments[index]
-        if argument in _SNAP_VALUE_OPTIONS:
-            index += 2
-            continue
-        if not argument.startswith("-"):
-            operands.append(argument)
-        index += 1
-    return bool(operands) and all(operand.endswith(".snap") for operand in operands)
 
 
 def _normalise_image_name(name: object) -> str:
