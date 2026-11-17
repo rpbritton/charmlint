@@ -786,3 +786,156 @@ class TestSnapInstallUnpinned:
         assert len(hits) == 1
         assert hits[0].fix_hint is not None
         assert "version that supports it" in hits[0].fix_hint
+
+
+class TestSnapRevisionWithoutHold:
+    @pytest.mark.parametrize(
+        ("source", "expected_lines"),
+        [
+            ("snap.add('workload', revision='123')\n", [2]),
+            (
+                "snap.ensure('workload', 'present', revision=revision)\n",
+                [2],
+            ),
+            (
+                "cache = snap.SnapCache()\n"
+                "workload = cache['workload']\n"
+                "workload.ensure(snap.SnapState.Latest, revision='123')\n",
+                [4],
+            ),
+            (
+                "workload = snap.SnapCache()['workload']\n"
+                "workload.ensure(snap.SnapState.Present, revision='123')\n"
+                "workload.hold()\n",
+                [],
+            ),
+            (
+                "snap.add('workload', revision='123')\nsnap.SnapCache()['other'].hold()\n",
+                [2],
+            ),
+            (
+                "snap.add('workload', revision='123')\n"
+                "def configure():\n"
+                "    snap.SnapCache()['workload'].hold()\n",
+                [],
+            ),
+            (
+                "snap.add('workload', revision='123')\nsnap.hold_refresh(forever=True)\n",
+                [],
+            ),
+            (
+                "snap.add('workload', revision='123')\nsnap.hold_refresh(days=0)\n",
+                [2],
+            ),
+            (
+                "snap.add('workload', revision='123')\nsnap.hold_refresh(days=0, forever=True)\n",
+                [],
+            ),
+            (
+                "snap.add('workload', revision='123')\nexternally_obtained_snap.hold()\n",
+                [],
+            ),
+            (
+                "snap.add(snap_name, revision=revision)\nsnap.SnapCache()[other_name].hold()\n",
+                [],
+            ),
+            (
+                "snap.SnapCache()['workload'].ensure(snap.SnapState.Absent, revision='123')\n",
+                [],
+            ),
+            (
+                "snap.add('workload')\n"
+                "snap.add('workload', revision=None)\n"
+                "snap.add('workload', revision='')\n",
+                [],
+            ),
+            (
+                "snap.add('workload', 'latest', 'stable', False, False, None, '123')\n"
+                "snap.add(*names, **options)\n",
+                [],
+            ),
+            (
+                "install = lambda: snap.add('workload', revision='123')\n",
+                [2],
+            ),
+        ],
+    )
+    def test_operator_library(
+        self, tmp_charm: pathlib.Path, source: str, expected_lines: list[int]
+    ):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(
+            "from charms.operator_libs_linux.v2 import snap\n" + source
+        )
+        hits = [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-008"]
+        assert [d.line for d in hits] == expected_lines
+        assert all(d.path == "src/charm.py" and d.severity == Severity.WARNING for d in hits)
+
+    @pytest.mark.parametrize(
+        ("source", "warns"),
+        [
+            ("s.ensure_installed('workload', revision='123')", True),
+            ("s.install(snap='workload', revision=123)", True),
+            ("s.refresh('workload', revision=revision)", True),
+            (
+                "s.ensure_installed('workload', revision='123')\ns.hold('workload')",
+                False,
+            ),
+            (
+                "s.install('workload', revision='123')\ns.hold('other')",
+                True,
+            ),
+            (
+                "s.refresh('workload', revision='123')\ns.hold(snap='workload', duration=3600)",
+                False,
+            ),
+            (
+                "s.ensure_installed('workload', revision='123')\ns.hold('workload', duration=0)",
+                True,
+            ),
+            (
+                "s.ensure_installed('workload', revision='123')\ns.unhold('workload')",
+                True,
+            ),
+            ("s.ensure_installed('workload', channel='stable')", False),
+            ("unrelated.ensure_installed('workload', revision='123')", False),
+        ],
+    )
+    def test_modern_library(self, tmp_charm: pathlib.Path, source: str, warns: bool):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text("from charmlibs import snap as s\n" + source)
+        hits = [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-008"]
+        assert bool(hits) is warns
+
+    def test_hold_in_another_module(self, tmp_charm: pathlib.Path):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(
+            "from charmlibs.snap import ensure_installed\n"
+            "ensure_installed('workload', revision='123')\n"
+        )
+        (tmp_charm / "src" / "workload.py").write_text(
+            "from charmlibs.snap import hold as hold_snap\n"
+            "def configure():\n"
+            "    hold_snap('workload')\n"
+        )
+        assert not [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-008"]
+
+    def test_test_only_hold_does_not_count(self, tmp_charm: pathlib.Path):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(
+            "from charmlibs import snap\nsnap.install('workload', revision='123')\n"
+        )
+        tests = tmp_charm / "tests" / "unit"
+        tests.mkdir(parents=True, exist_ok=True)
+        (tests / "test_charm.py").write_text("from charmlibs import snap\nsnap.hold('workload')\n")
+        hits = [d for d in lint(tmp_charm) if d.rule_id == "SUPPLYCHAIN-008"]
+        assert [d.line for d in hits] == [2]
+
+    def test_hold_does_not_trigger_missing_revision_rule(self, tmp_charm: pathlib.Path):
+        write_charmcraft_yaml(tmp_charm, {"name": "x"})
+        (tmp_charm / "src" / "charm.py").write_text(
+            "from charmlibs import snap\n"
+            "snap.SnapCache()['workload'].hold()\n"
+            "snap.hold('workload')\n"
+        )
+        assert not [d for d in lint(tmp_charm) if d.rule_id.startswith("SUPPLYCHAIN-00")]
