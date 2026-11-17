@@ -6,13 +6,16 @@ charm records where each of those artefacts comes from and which
 versions it accepts.
 """
 
+import ast
 import dataclasses
 import functools
 import pathlib
 import re
+from collections import Counter
+from collections.abc import Iterator
 from typing import Any
 
-from .. import _dependencies, _yaml
+from .. import _ast, _dependencies, _yaml
 from .. import _models as models
 from ._base import Rule
 
@@ -386,7 +389,164 @@ class OpsDependencyExactlyPinned(Rule):
         ]
 
 
+class SnapInstallUnpinned(Rule):
+    """Flag snap-library ``add`` and ``ensure`` calls without a revision.
+
+    A requested revision does not prevent later automatic refreshes.
+    """
+
+    category = "SUPPLYCHAIN"
+    number = 7
+    name = "snap-install-unpinned"
+    description = "snap installation does not specify a revision"
+    default_severity = models.Severity.WARNING
+    reference_url = (
+        "https://canonical.com/juju/docs/ops/latest/howto/run-workloads-with-a-charm-machines/"
+    )
+
+    def check(self, context: models.CharmContext) -> list[models.Diagnostic]:
+        diagnostics: list[models.Diagnostic] = []
+        for module in context.charm_sources():
+            imports = _ast.Imports.of(module)
+            for call in _unpinned_snap_library_calls(module, imports):
+                diagnostics.append(
+                    self.diagnostic(
+                        "snap installation does not specify a revision",
+                        path=module.path,
+                        line=call.lineno,
+                        fix_hint="Specify `revision=` using a snap library version that supports it",
+                    )
+                )
+        return diagnostics
+
+
 _IMAGE_SUFFIXES = ("-image", "_image")
+_SNAP_LIBRARY = re.compile(r"^(?:charmlibs|charms\.operator_libs_linux\.v\d+)\.snap$")
+
+
+def _unpinned_snap_library_calls(
+    module: models.Module, imports: _ast.Imports
+) -> Iterator[ast.Call]:
+    """Find unpinned install calls on recognized snap library objects."""
+    scopes = (
+        module.tree,
+        *module.walk(ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+    )
+    for scope in scopes:
+        caches: set[str] = set()
+        snaps: set[str] = set()
+        nodes = sorted(
+            _scope_nodes(scope),
+            key=lambda node: (getattr(node, "lineno", 0), getattr(node, "col_offset", 0)),
+        )
+        bindings = Counter(
+            node.id
+            for node in nodes
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del)
+        )
+        for node in nodes:
+            if isinstance(node, ast.Assign | ast.AnnAssign):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                value = node.value
+                is_cache = value is not None and _snap_cache(value, imports)
+                is_snap = value is not None and _snap_from_cache(value, caches, imports)
+                for target in targets:
+                    if not isinstance(target, ast.Name) or bindings[target.id] != 1:
+                        continue
+                    name = target.id
+                    if is_cache:
+                        caches.add(name)
+                    if is_snap:
+                        snaps.add(name)
+            elif isinstance(node, ast.Call) and _unpinned_snap_library_call(
+                node, imports, caches, snaps
+            ):
+                yield node
+
+
+def _scope_nodes(scope: ast.AST) -> Iterator[ast.AST]:
+    """Walk one lexical scope without entering nested scopes."""
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+            continue
+        yield child
+        yield from _scope_nodes(child)
+
+
+def _snap_cache(node: ast.AST, imports: _ast.Imports) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    target = _ast.call_target(node, imports)
+    if target is None:
+        return False
+    module, _, name = target.rpartition(".")
+    return name == "SnapCache" and bool(_SNAP_LIBRARY.fullmatch(module))
+
+
+def _snap_from_cache(node: ast.AST, caches: set[str], imports: _ast.Imports) -> bool:
+    return isinstance(node, ast.Subscript) and (
+        _snap_cache(node.value, imports) or _ast.dotted_name(node.value) in caches
+    )
+
+
+def _unpinned_snap_library_call(
+    call: ast.Call, imports: _ast.Imports, caches: set[str], snaps: set[str]
+) -> bool:
+    """Recognize install-capable library calls with an absent revision."""
+    if any(keyword.arg is None for keyword in call.keywords) or any(
+        isinstance(argument, ast.Starred) for argument in call.args
+    ):
+        return False
+    target = _ast.call_target(call, imports)
+    module, _, method = (target or "").rpartition(".")
+    if _SNAP_LIBRARY.fullmatch(module) and method in {"add", "ensure"}:
+        state_index = 1
+        accepts_string_state = True
+        accepts_enum_state = method == "add"
+        max_unambiguous_args = 5
+    elif (
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "ensure"
+        and (
+            _ast.dotted_name(call.func.value) in snaps
+            or _snap_from_cache(call.func.value, caches, imports)
+        )
+    ):
+        method = "ensure"
+        state_index = 0
+        accepts_string_state = False
+        accepts_enum_state = True
+        max_unambiguous_args = 4
+    else:
+        return False
+    # Older v2 libraries place the revision before newer versions do.
+    if len(call.args) > max_unambiguous_args:
+        return False
+    state = call.args[state_index] if len(call.args) > state_index else _ast.keyword(call, "state")
+    if state is None:
+        if method != "add":
+            return False
+    elif not _install_state(
+        state,
+        imports,
+        strings=accepts_string_state,
+        enums=accepts_enum_state,
+    ):
+        return False
+    revision = _ast.keyword(call, "revision")
+    return revision is None or (
+        isinstance(revision, ast.Constant) and revision.value in (None, "", 0)
+    )
+
+
+def _install_state(state: ast.expr, imports: _ast.Imports, *, strings: bool, enums: bool) -> bool:
+    if isinstance(state, ast.Constant):
+        return strings and state.value in ("present", "latest")
+    if not enums:
+        return False
+    target = imports.resolve(state)
+    module, _, value = (target or "").rpartition(".SnapState.")
+    return value in {"Present", "Latest"} and bool(_SNAP_LIBRARY.fullmatch(module))
 
 
 def _normalise_image_name(name: object) -> str:
